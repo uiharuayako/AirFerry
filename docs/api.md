@@ -1,5 +1,15 @@
 # API 参考 (API Reference)
 
+## Python 发送端 API
+
+```python
+from airferry import file_to_video
+
+result = file_to_video("data.zip", "data.mp4")
+```
+
+`file_to_video` 直接复用以下 Rust 核心，返回带视频路径、帧数和传输信息的 `VideoResult`。完整参数、`VideoProgress` 回调、安装后全本地生成约束及构建方式见 [Python 使用与构建指南](build-python.md) 和 [包接口说明](../apps/python/README.md)。
+
 ## Rust 核心 API
 
 ### raptorq-core
