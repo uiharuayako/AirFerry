@@ -1,6 +1,6 @@
 # AirFerry Python
 
-将本地文件转换成可由 AirFerry 接收端扫描的 MP4 二维码视频。Python 负责接口与视频输出，RaptorQ、帧格式和二维码矩阵直接复用项目的 Rust 核心。
+将文件转换成可由 AirFerry 接收端扫描的 MP4 二维码视频。Python 负责接口与视频输出，RaptorQ、帧格式和二维码矩阵直接复用项目的 Rust 核心。
 
 Python 包版本独立为 **0.1.0**。当前仓库已提供构建配置，尚未发布到 PyPI；`airferry` 发行名称的可用性需在实际发布时确认。
 
@@ -26,7 +26,9 @@ airferry report.pdf report-4qr.mp4 --qr-count 4 --fps 30 --compression auto
 python -m airferry report.pdf report.mp4 --overwrite
 ```
 
-安装完成后，生成视频全程在本机执行：不下载模型或编码器、不发送遥测、不调用在线服务。`imageio-ffmpeg` 的平台 wheel 在安装时带入 FFmpeg；运行时只使用该已安装 wheel 自带的本地可执行文件，缺失就报错，不回退系统 PATH、Conda 或 `IMAGEIO_FFMPEG_EXE`。输入、输出和临时目录必须位于本地文件系统，UNC、远程映射盘及网络 URL 不受支持。
+安装可以联网；安装完成后，压缩、RaptorQ、二维码和视频编码均在本机完成，不调用在线服务、不发送遥测，也不在运行时补下载模型或编码器。`imageio-ffmpeg` 的平台 wheel 在安装时带入 FFmpeg；运行时使用该 wheel 自带的可执行文件，缺失就报错。
+
+输入、输出和临时目录按普通文件 I/O 处理，不限制存储位置。可使用 UNC、映射盘、符号链接及 NFS 等挂载路径；`file://` URL 会转换为文件系统路径，含 UNC 主机形式。网络存储的正常读写可能产生网络流量。其他 URL 需要相应文件 I/O 适配，当前接口不提供 HTTP 上传协议。
 
 需要在隔离环境安装时，先在相同系统与 CPU 架构的联网环境准备本包 wheel 和所有依赖的 wheel，再复制到隔离设备：
 
@@ -34,7 +36,7 @@ python -m airferry report.pdf report.mp4 --overwrite
 python -m pip install --no-index --find-links ./wheelhouse airferry==0.1.0
 ```
 
-此离线契约覆盖本包调用链和本包启动的 FFmpeg；操作系统及其他程序的网络行为由其自身配置决定。
+“离线”指编码计算不依赖线上服务或运行期组件下载，不限制用户选择的文件存储。
 
 ## 接口
 
@@ -57,7 +59,7 @@ file_to_video(
 
 | 参数 | 含义 |
 |------|------|
-| `input_path` / `output_path` | 本地文件路径；输出必须为 `.mp4`，父目录需已存在 |
+| `input_path` / `output_path` | 文件系统路径或 `file://` URL；输出必须为 `.mp4`，父目录需已存在 |
 | `fps` | 视频帧率，整数 1–120，默认 30 |
 | `symbol_size` | 每个协议码的负载字节数，默认 1400；64–2888 且按 8 对齐，还需容纳完整描述符 |
 | `qr_count` | 每视频帧 1 个或 4 个不同协议二维码 |
@@ -85,6 +87,8 @@ result = file_to_video(
 ```
 
 视频采用 H.264、CRF 18、`yuv420p`，默认单码画面为 532×532，四码画面为 1064×1064。二维码使用整数倍最近邻放大，每码四模块白边。输出在同目录临时文件中完成编码，成功后才提交；出错会清理临时结果。
+
+默认不覆盖的发布优先使用原子操作；文件系统不支持硬链接时，改为独占创建目标后复制，仍不会覆盖已有文件，但复制期间目标可能暂时可见。
 
 每个分段的每次传输至少写入 1 秒视频；小文件达到最低符号预算后继续产生新的修复符号，给扫码和元数据同步留出时间。
 

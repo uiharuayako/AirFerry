@@ -10,10 +10,10 @@ from . import __version__, file_to_video
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Convert a local file to an offline AirFerry QR video."
+        description="Convert a file to an AirFerry QR video using offline codecs."
     )
     parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument("input", help="local file to transfer")
+    parser.add_argument("input", help="input filesystem path or file URL")
     parser.add_argument("output", help="output .mp4 path")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--qr-count", type=int, choices=(1, 4), default=1)

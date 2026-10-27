@@ -32,15 +32,15 @@ python -m airferry data.zip data.mp4 --compression xz --overwrite
 
 完整参数与进度回调见 [`apps/python/README.md`](../apps/python/README.md)。接口默认 30 fps、单码、模块 4 像素、50% 修复比例、1 次完整传输和 `auto` 压缩。协议 `symbol_size` 默认 1400 字节，可通过 Python 参数或 CLI `--symbol-size` 调整：64–2888 字节且按 8 对齐，过小导致描述符无法容纳时明确报错。每码保留四模块白边，整数倍最近邻放大；默认输出为 532×532（单码）或 1064×1064（四码）。使用 H.264、CRF 18、medium preset、`yuv420p`，不添加声音。
 
-输出路径只接受 `.mp4`，父目录必须已存在；默认不覆盖已有文件。编码器先写输出同目录的临时文件，成功退出后提交，失败清理临时文件。文件夹、空文件、ETBUNDL1 多文件容器和 ETTEXTv1 专用文字容器不由此接口生成。
+输出路径只接受 `.mp4`，父目录必须已存在；默认不覆盖已有文件。编码器先写输出同目录的临时文件，成功退出后提交，失败清理临时文件。默认无覆盖发布优先使用原子操作；文件系统不支持硬链接时，使用独占创建后复制，仍不覆盖并发创建的目标，但复制期间目标文件可能暂时可见。不支持文件夹、空文件、ETBUNDL1 多文件容器和 ETTEXTv1 专用文字容器。
 
-## 安装完成后的离线契约
+## 编码计算与文件存储
 
-文件处理、RaptorQ 编码、QR 矩阵生成和 MP4 编码均在本机执行，不调用在线服务，不下载模型或 FFmpeg，也不发送遥测。`imageio-ffmpeg` 的平台 wheel 在安装阶段提供本机 FFmpeg；运行时只使用该 wheel 自带的二进制，不回退系统 PATH、Conda 或 `IMAGEIO_FFMPEG_EXE`，并屏蔽 `FFREPORT` 环境配置。缺少二进制或 H.264 编码器时清晰报错。
+安装阶段可以联网获取依赖。安装完成后，压缩、RaptorQ、QR 矩阵和 MP4 编码均在本机执行，不调用在线服务，不发送遥测，也不在运行时补下载模型或编码器。`imageio-ffmpeg` 的平台 wheel 在安装时提供 FFmpeg；运行时使用该 wheel 自带的二进制，缺少二进制或 H.264 编码器时清晰报错。
 
-输入、输出和系统临时目录必须为本地路径。`_paths.py` 在访问目标文件前校验存储来源：Windows 拒绝远程映射盘和 reparse point；Linux 读取 `/proc/self/mountinfo`，仅接受已知本地文件系统，拒绝 NFS、CIFS、SSHFS、未知 FUSE 和自动挂载；macOS 用不刷新远程统计的缓存挂载信息判断本地标记。POSIX 符号链接按路径组件逐一处理，先验证所属挂载再读取该组件，避免校验本身触发远程文件访问。无法确定本地存储时直接报错。
+文件存储按普通文件系统语义处理，不检查路径是否位于本地磁盘。输入、输出和临时目录可使用 UNC、远程映射盘、reparse point、符号链接、NFS 等正常路径；系统文件 API 的读写可能产生相应网络流量。`file://` URL 会转换为文件系统路径，含 UNC 主机形式；其他 URL 需要相应文件 I/O 适配，当前接口不提供 HTTP 上传协议。
 
-临时目录配置、缓存值和候选目录同样会先校验，再允许 `tempfile` 进行可写性探测。FFmpeg 子进程只允许 `file,pipe` 协议，视频输入为本地管道中的灰度帧。此契约覆盖本包调用链和本包启动的 FFmpeg；操作系统与其他进程的联网行为不由本包控制。
+FFmpeg 从管道读取已生成的灰度帧，通过文件 API 写 MP4；`file,pipe` 协议设置不妨碍操作系统访问网络文件系统。“离线”约束的是编码计算对线上服务和组件下载的依赖，不要求整个进程没有任何网络流量。
 
 为隔离设备准备安装材料时，在相同系统和 CPU 架构的联网设备上先构建本包 wheel，再收集依赖：
 
@@ -86,7 +86,9 @@ python -m pytest apps/python/tests -m "not slow"
 python -m pytest apps/python/tests -m interop
 ```
 
-离线测试包含启动全新 Python 进程、在导入包之前通过 audit hook 禁止全部 `socket.*` 事件，再实际生成四码 MP4；另验证 FFmpeg 的输入和输出均只允许 `file,pipe`，网络路径及临时目录配置在文件探测前被拒绝。本机还验证了仅安装本包、Pillow 和 imageio-ffmpeg 的干净虚拟环境，无网络安装后完成视频生成。真实视频测试覆盖丢帧恢复和超过 256 MiB 的原文件压缩后使用单段 v5，不能据此声称完成了手机拍摄验收。
+离线编码测试使用本地样本，启动全新 Python 进程、在导入包之前通过 audit hook 禁止全部 `socket.*` 事件，再实际生成四码 MP4；另验证 FFmpeg 的灰度输入走管道、MP4 输出走文件 API。这证明编码计算不依赖在线服务，不要求用户指定的网络文件系统 I/O 没有流量。本机还验证了仅安装本包、Pillow 和 imageio-ffmpeg 的干净虚拟环境，离线安装后完成视频生成。测试还覆盖 `file://`、链接目录及不支持硬链接时的保存降级；真实视频恢复覆盖丢帧和超过 256 MiB 的原文件压缩后使用单段 v5，不能据此声称完成了手机拍摄验收。
+
+Windows 本机 SMB 共享也已实际验证：输入、输出和临时目录全部使用 UNC 路径，以及使用对应 `file://` URL 生成视频，均能经 QR 解码和独立 Rust 接收器逐字节恢复原文件。
 
 构建工具采用 [maturin 的混合 Python/Rust 项目布局](https://www.maturin.rs/project_layout.html)，`pyproject.toml` 负责 Python 元数据，Python 版本从 crate 的 `0.1.0` 读取。最低 maturin 版本为 1.15，以避开旧版本的 workspace 源码包处理问题。maturin 的 sdist 收集本地 path 依赖，源码包必须包含三个共享 crate 和 vendored `fast_qr`；发布前应从源码包本身重建 wheel，验证没有隐含依赖仓库外部文件。[maturin 分发指南](https://www.maturin.rs/distribution.html)说明了源码包与 manylinux 构建要求。
 
@@ -105,8 +107,8 @@ python -m pip wheel --no-deps --wheel-dir dist/sdist-check dist/python/airferry-
 
 ## CI 与未来发布
 
-`.github/workflows/python.yml` 为 Windows x64、Linux x64（manylinux2014）、macOS Intel 与 Apple Silicon 构建 abi3 wheel，并安装生成的 wheel 运行测试；另一个 job 检查 sdist 中 vendored QR 文件完整且不含缓存/旧制品，再从 sdist 重新构建 wheel，并运行两项 WASM 隔离回归。运行时禁止网络访问的测试在依赖安装完成之后执行。CI 固定 maturin 1.15.0，并将制品保留为 GitHub Actions artifacts。
+`.github/workflows/python.yml` 为 Windows x64、Linux x64（manylinux2014）、macOS Intel 与 Apple Silicon 构建 abi3 wheel，并安装生成的 wheel 运行测试；另一个 job 检查 sdist 中 vendored QR 文件完整且不含缓存/旧制品，再从 sdist 重新构建 wheel，并运行两项 WASM 隔离回归。真实离线编码测试在依赖安装完成之后执行。CI 固定 maturin 1.15.0，并将制品保留为 GitHub Actions artifacts。
 
-本轮本机验证在 Windows 上进行；Linux/macOS 的原生挂载查询与视频生成已配置 CI 验证，当前尚未取得这两个平台的真实 CI 通过记录。
+本轮本机验证在 Windows 上进行；Linux/macOS 视频生成已配置 CI 验证，当前尚未取得这两个平台的真实 CI 通过记录。
 
 推送相关源码、pull request 和手动 `workflow_dispatch` 均只执行构建与验证，不创建 Release，也不上传 PyPI。`scripts/build-all.sh` 不包含 Python 构建或上传步骤。未来首次发布前需要确认 PyPI 发行名称、账户权限、最终版本以及目标平台制品，之后才能运行发布命令；不要把当前源码安装示例当作 PyPI 已上架证明。

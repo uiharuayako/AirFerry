@@ -1,9 +1,12 @@
 """Public API behavior and runtime offline/transaction guarantees."""
 
+import errno
+import os
 import socket
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from airferry import VideoProgress, file_to_video, video
@@ -26,7 +29,7 @@ def test_offline_generation(tmp_path, monkeypatch):
         monkeypatch.setattr(socket, name, forbidden)
     # Even an explicitly configured remote FFmpeg must not be consulted.
     monkeypatch.setenv("IMAGEIO_FFMPEG_EXE", "https://example.invalid/ffmpeg")
-    monkeypatch.setenv("FFREPORT", "file=//example.invalid/share/ffmpeg.log")
+    monkeypatch.delenv("FFREPORT", raising=False)
     real_popen = subprocess.Popen
     commands = []
 
@@ -44,7 +47,6 @@ def test_offline_generation(tmp_path, monkeypatch):
         ]
         assert len(whitelist_positions) == 2
         assert all(command[i + 1] == "file,pipe" for i in whitelist_positions)
-        assert "FFREPORT" not in kwargs["env"]
         assert Path(command[0]).parent.name == "binaries"
         return real_popen(command, **kwargs)
 
@@ -107,19 +109,126 @@ def test_output_created_during_conversion_is_not_overwritten(tmp_path):
     assert destination.read_bytes() == b"another writer"
 
 
-def test_rejects_unsafe_paths_and_input_overwrite(tmp_path):
+def test_input_cannot_be_overwritten(tmp_path):
     source = tmp_path / "input.mp4"
     source.write_bytes(b"input must survive")
     with pytest.raises(ValueError, match="different files"):
         file_to_video(source, source, overwrite=True)
-    for name in (
-        "https://example.invalid/a.bin",
-        "//server/share/a.bin",
-        "\\\\server\\share\\a.bin",
-    ):
-        with pytest.raises(ValueError, match="local filesystem"):
-            file_to_video(name, tmp_path / "output.mp4")
     assert source.read_bytes() == b"input must survive"
+
+
+def test_file_urls_with_escaped_names_generate_real_video(tmp_path):
+    source = tmp_path / "输入 空格#%.bin"
+    source.write_bytes(b"file URI input\0\xff" * 200)
+    destination = tmp_path / "输出 空格#%.mp4"
+    result = file_to_video(source.as_uri(), destination.as_uri())
+    assert result.path == destination
+    assert destination.read_bytes()[4:8] == b"ftyp"
+
+
+def test_file_url_hosts_are_preserved_as_filesystem_paths():
+    assert (
+        video._filesystem_path("file://server/share/a%20b.bin")
+        == Path("//server/share/a b.bin").absolute()
+    )
+    assert (
+        video._filesystem_path("file:////server/share/a%20b.bin")
+        == Path("//server/share/a b.bin").absolute()
+    )
+
+
+def test_localhost_file_urls_preserve_windows_shares():
+    if os.name == "nt":
+        assert video._filesystem_path("file://localhost/share/a%20b.bin") == Path(
+            "//localhost/share/a b.bin"
+        )
+        assert video._filesystem_path("file://localhost/C:/a%20b.bin") == Path(
+            "C:/a b.bin"
+        )
+
+
+def test_linked_storage_and_temporary_directory_are_accepted(tmp_path, monkeypatch):
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    (storage / "temporary").mkdir()
+    source = storage / "source.bin"
+    source.write_bytes(b"filesystem access through links" * 200)
+    linked = tmp_path / "linked"
+    if os.name == "nt":
+        # Directory junctions are reparse points and need no symlink privilege.
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(linked), str(storage)],
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode:
+            pytest.skip("directory junction creation is unavailable")
+    else:
+        linked.symlink_to(storage, target_is_directory=True)
+    try:
+        # Some Windows volumes allow junction traversal but reject directory
+        # creation through it. Avoid tempfile's repeated name retries there.
+        probe = linked / "temporary" / "write-probe"
+        try:
+            probe.mkdir()
+        except OSError:
+            pytest.skip("the filesystem cannot create directories through this link")
+        else:
+            probe.rmdir()
+        with monkeypatch.context() as context:
+            context.setattr(video.tempfile, "tempdir", str(linked / "temporary"))
+            result = file_to_video(linked / "source.bin", linked / "output.mp4")
+        assert result.path.read_bytes()[4:8] == b"ftyp"
+        assert (storage / "output.mp4").is_file()
+        assert list((storage / "temporary").iterdir()) == []
+    finally:
+        if os.name == "nt":
+            linked.rmdir()
+        else:
+            linked.unlink()
+
+
+def _unsupported_hardlinks(monkeypatch):
+    def unsupported(*_args):
+        raise OSError(errno.EOPNOTSUPP, "filesystem does not support hard links")
+
+    # Exercise the POSIX publish branch even on Windows without modifying the
+    # process-wide os.name that pathlib and pytest also consult.
+    monkeypatch.setattr(video, "os", SimpleNamespace(name="posix", link=unsupported))
+
+
+def test_publish_without_hardlink_support_keeps_no_overwrite_guarantee(
+    tmp_path, monkeypatch
+):
+    _unsupported_hardlinks(monkeypatch)
+    temporary = tmp_path / "temporary.mp4"
+    destination = tmp_path / "destination.mp4"
+    temporary.write_bytes(b"completed video")
+    video._publish(temporary, destination, False)
+    assert destination.read_bytes() == b"completed video"
+    assert not temporary.exists()
+    temporary.write_bytes(b"another video")
+    with pytest.raises(FileExistsError):
+        video._publish(temporary, destination, False)
+    assert destination.read_bytes() == b"completed video"
+    assert temporary.read_bytes() == b"another video"
+
+
+def test_publish_copy_failure_cleans_new_output(tmp_path, monkeypatch):
+    _unsupported_hardlinks(monkeypatch)
+    temporary = tmp_path / "temporary.mp4"
+    destination = tmp_path / "destination.mp4"
+    temporary.write_bytes(b"completed video")
+
+    def interrupted_copy(_source, output, **_kwargs):
+        output.write(b"partial")
+        raise OSError("storage interrupted")
+
+    monkeypatch.setattr(video.shutil, "copyfileobj", interrupted_copy)
+    with pytest.raises(OSError, match="storage interrupted"):
+        video._publish(temporary, destination, False)
+    assert not destination.exists()
+    assert temporary.read_bytes() == b"completed video"
 
 
 def test_empty_file_and_invalid_qr_configuration(tmp_path):

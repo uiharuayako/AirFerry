@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "airferry"
 dynamic = ["version"]
-description = "Convert local files into offline AirFerry QR transfer videos."
+description = "Convert files into AirFerry QR transfer videos with offline codecs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "../../LICENSE" }

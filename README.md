@@ -87,7 +87,7 @@ from airferry import file_to_video
 file_to_video("report.pdf", "report.mp4")
 ```
 
-也可使用 `airferry report.pdf report.mp4 --qr-count 4`。安装完成后，视频生成只使用本地文件、Rust 核心和本机 FFmpeg，无运行期下载、遥测或在线服务；缺少依赖时直接报错。支持大文件分段。源码安装需要 Rust/C 构建工具，离线 wheel 安装与完整接口见[Python 构建指南](docs/build-python.md)。
+也可使用 `airferry report.pdf report.mp4 --qr-count 4`。安装完成后，压缩和视频编码使用 Rust 核心与本机 FFmpeg，无运行期组件下载、遥测或在线服务。文件可位于普通磁盘、UNC、映射盘或 NFS 等文件系统，支持 `file://` URL；网络存储按正常文件 I/O 访问。支持大文件分段。源码安装需要 Rust/C 构建工具，离线 wheel 安装与完整接口见[Python 构建指南](docs/build-python.md)。
 
 ### Android 接收端
 

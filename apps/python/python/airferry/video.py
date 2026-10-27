@@ -1,8 +1,10 @@
-"""Render protocol-compatible QR frames to a local MP4, without network I/O."""
+"""Encode QR video offline, using filesystem paths chosen by the caller."""
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -10,14 +12,14 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 import imageio_ffmpeg
 from imageio_ffmpeg._definitions import FNAME_PER_PLATFORM
 from PIL import Image, ImageOps
 
 from ._native import SEGMENT_RAW_BYTES, NativeTransfer
-from ._paths import local_path as _local_path
-from ._paths import local_temp_root
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,24 @@ def _integer(name: str, value: int, minimum: int, maximum: int) -> None:
         or not minimum <= value <= maximum
     ):
         raise ValueError(f"{name} must be an integer in {minimum}..{maximum}")
+
+
+def _filesystem_path(value: str | os.PathLike[str]) -> Path:
+    """Accept ordinary OS paths and file URLs without storage-location policy."""
+    raw = os.fspath(value)
+    if isinstance(raw, str) and raw.lower().startswith("file:"):
+        parsed = urlsplit(raw)
+        location = parsed.path
+        local_authority = parsed.netloc.lower() == "localhost"
+        windows_drive = (
+            len(location) >= 3 and location[0] == "/" and location[2] in (":", "|")
+        )
+        if parsed.netloc and not (
+            local_authority and (os.name != "nt" or windows_drive)
+        ):
+            location = f"//{parsed.netloc}{location}"
+        raw = url2pathname(location)
+    return Path(raw).absolute()
 
 
 def _frame_budget(k: int, redundancy_pct: int, qr_count: int) -> int:
@@ -155,7 +175,7 @@ def _ffmpeg_executable() -> Path:
         raise RuntimeError(
             "No bundled FFmpeg for this platform; install a supported imageio-ffmpeg wheel"
         )
-    path = _local_path(Path(imageio_ffmpeg.__file__).parent / "binaries" / name)
+    path = Path(imageio_ffmpeg.__file__).parent / "binaries" / name
     if not path.is_file():
         raise FileNotFoundError(
             "Bundled FFmpeg is missing; reinstall the imageio-ffmpeg wheel"
@@ -169,9 +189,27 @@ def _publish(temporary: Path, destination: Path, overwrite: bool) -> None:
     elif os.name == "nt":
         os.rename(temporary, destination)  # Windows rename fails if destination exists.
     else:
-        os.link(
-            temporary, destination
-        )  # Atomic no-replace, including concurrent writers.
+        try:
+            os.link(temporary, destination)  # Atomic no-replace where supported.
+        except OSError as error:
+            if error.errno not in {
+                errno.ENOTSUP,
+                errno.EOPNOTSUPP,
+                errno.EPERM,
+                errno.ENOSYS,
+                errno.EXDEV,
+            }:
+                raise
+            # Network shares and some local filesystems do not support links.
+            # Exclusive creation still prevents overwriting a concurrent writer.
+            with temporary.open("rb") as source:
+                output = destination.open("xb")
+                try:
+                    with output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                except BaseException:
+                    destination.unlink(missing_ok=True)
+                    raise
         temporary.unlink()
 
 
@@ -189,11 +227,13 @@ def file_to_video(
     overwrite: bool = False,
     progress: Callable[[VideoProgress], None] | None = None,
 ) -> VideoResult:
-    """Convert one local file to an AirFerry-compatible H.264 MP4.
+    """Convert one file to an AirFerry-compatible H.264 MP4 using offline codecs.
 
-    Installation supplies the native encoder and FFmpeg. This operation only
-    reads/writes local files and pipes: it never downloads anything or calls a
-    server. Network shares and Windows mapped drives are rejected.
+    Installation supplies the native encoder and FFmpeg. Compression and video
+    encoding do not use online services or download runtime components. Input,
+    output, and temporary storage use normal filesystem I/O, including network
+    shares, mapped drives, symbolic links, and file URLs. Network storage may
+    produce filesystem traffic independently of the offline encoding pipeline.
 
     ``compression`` is ``auto`` (smaller of raw and Zstd level 1), ``none``,
     ``zstd``, or ``xz``. One pass contains all source symbols plus at least
@@ -219,8 +259,8 @@ def file_to_video(
         raise ValueError("compression must be auto, none, zstd, or xz")
     if progress is not None and not callable(progress):
         raise TypeError("progress must be callable")
-    source = _local_path(input_path)
-    destination = _local_path(output_path)
+    source = _filesystem_path(input_path)
+    destination = _filesystem_path(output_path)
     if not source.is_file():
         raise FileNotFoundError(f"input is not a file: {source}")
     if destination.suffix.lower() != ".mp4":
@@ -233,13 +273,12 @@ def file_to_video(
         destination.exists() and os.path.samefile(source, destination)
     ):
         raise ValueError("input and output must be different files")
-    if destination.exists() and not overwrite:
+    if os.path.lexists(destination) and not overwrite:
         raise FileExistsError(destination)
     if destination.is_dir():
         raise IsADirectoryError(destination)
     executable_path = _ffmpeg_executable()
-    temp_root = local_temp_root()
-    with tempfile.TemporaryDirectory(prefix="airferry-", dir=temp_root) as work:
+    with tempfile.TemporaryDirectory(prefix="airferry-") as work:
         transfer = NativeTransfer(
             source, Path(work) / "payload.bin", compression, symbol_size, redundancy_pct
         )
@@ -291,11 +330,6 @@ def file_to_video(
                                         creationflags=subprocess.CREATE_NO_WINDOW
                                         if os.name == "nt"
                                         else 0,
-                                        env={
-                                            key: value
-                                            for key, value in os.environ.items()
-                                            if key.upper() != "FFREPORT"
-                                        },
                                     )
                                 if frame.size != (width, height):
                                     raise RuntimeError(
